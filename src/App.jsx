@@ -16,6 +16,7 @@ import { isSupabaseConfigured, supabase } from './lib/supabase'
 const PROGRESS_KEY = 'algotrack-question-progress'
 const RESOURCE_PROGRESS_KEY = 'algotrack-resource-progress'
 const ADMIN_TOKEN_KEY = 'algotrack-admin-session'
+const WRONG_PASSWORD_MESSAGE = 'Wrong password. Please try again or contact the admin.'
 
 const emptyQuestion = {
   question_name: '', topic: TOPICS[0], difficulty: 'Easy', platform: 'LeetCode',
@@ -829,14 +830,23 @@ function App() {
     try {
       if (!isSupabaseConfigured) throw new Error('Set up Supabase in .env before signing in.')
       const { data, error: fnError } = await supabase.functions.invoke('admin-content', { body: { action: 'login', password } })
-      if (fnError || data?.error || !data?.adminToken) throw new Error(data?.error || fnError?.message || 'Admin verification failed.')
+      if (fnError || data?.error || !data?.adminToken) {
+        if (fnError?.context?.status === 401 || data?.error === 'Incorrect admin password.') {
+          setLoginError(WRONG_PASSWORD_MESSAGE)
+          return
+        }
+        throw new Error('Unable to verify admin password. Please try again.')
+      }
       localStorage.setItem(ADMIN_TOKEN_KEY, data.adminToken)
       setAdminToken(data.adminToken)
       setPassword('')
+      setLoginError('')
       setLoginOpen(false)
       setAdminOpen(true)
     } catch (reason) {
-      setLoginError(reason.message || 'Unable to verify admin password.')
+      setLoginError(reason.message === 'Set up Supabase in .env before signing in.'
+        ? reason.message
+        : 'Unable to verify admin password. Please try again.')
     } finally { setBusy(false) }
   }
 
@@ -1082,7 +1092,7 @@ function App() {
       <form className="space-y-4" onSubmit={login}>
         <p className="text-sm leading-6 text-muted">Admin mode is reserved for the site owner. Enter the private admin password to manage public content.</p>
         <Field label="Admin password">
-          <input type="password" autoFocus autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} className={inputClass} placeholder="Enter password" required />
+          <input type="password" autoFocus autoComplete="current-password" value={password} onChange={event => { setPassword(event.target.value); setLoginError('') }} className={inputClass} placeholder="Enter password" required />
         </Field>
         {loginError && <p role="alert" className="text-sm text-red-600">{loginError}</p>}
         <div className="flex justify-end gap-2 pt-1"><Button variant="outline" type="button" onClick={() => setLoginOpen(false)}>Cancel</Button><Button disabled={busy}>{busy && <LoaderCircle size={15} className="animate-spin" />}Continue<ArrowRight size={15} /></Button></div>
