@@ -123,6 +123,7 @@ Never put your Supabase service role key or admin secrets in frontend environmen
 - Create a Supabase project.
 - Run `supabase/schema.sql` in the Supabase SQL Editor.
 - Run `supabase/migrations/20261125_dsa_sections.sql` after `schema.sql` to add admin-managed DSA sections, topics, and question links.
+- Run `supabase/migrations/20261126_resource_sections.sql` to add resource sections, topics, and resource links.
 - Configure the required environment variables.
 - Deploy the `admin-content` Edge Function if you need admin functionality.
 
@@ -139,6 +140,18 @@ npx supabase functions deploy admin-content
 ```
 
 Questions remain stored once in `questions`; `dsa_topic_questions` links a question to one or more section topics. Deleting a section or topic only removes its links, while deleting a question through the existing global question manager removes its links through the foreign-key cascade.
+
+#### Apply resource sections to an existing project
+
+Back up the database first. In the Supabase Dashboard SQL Editor, run `supabase/migrations/20261126_resource_sections.sql`. It creates only the three resource-section/link tables, their indexes, read-only RLS policies, and grants; existing resources and categories are not changed or deleted. The migration is safe to rerun.
+
+Redeploy the existing `admin-content` Edge Function after applying the migration so its resource section, topic, ordering, and resource-link actions are available:
+
+```bash
+npx supabase functions deploy admin-content
+```
+
+Resources remain stored once in `resources`; `resource_topic_resources` links each resource to one or more topics. Section or topic deletion only removes its links. A resource deleted through the existing global resource manager is removed from topic links by the foreign-key cascade. Resource completion is stored separately in browser `localStorage`.
 
 ### 6. Start the Development Server
 

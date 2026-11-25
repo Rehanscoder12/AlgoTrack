@@ -267,6 +267,59 @@ Deno.serve(async request => {
       if (typeof body.id !== 'string') return jsonResponse({ error: 'Resource ID is required.' }, 400)
       result = await client.from('resources').update(values).eq('id', body.id).select().maybeSingle()
     }
+  } else if (action === 'create-resource-in-topic') {
+    if (!isUuid(body.topicId)) return jsonResponse({ error: 'A valid topic ID is required.' }, 400)
+    if (!body.resource || typeof body.resource !== 'object' || !validResource(body.resource as Record<string, unknown>)) {
+      return jsonResponse({ error: 'Resource details are invalid.' }, 400)
+    }
+    const topicResult = await client.from('resource_section_topics').select('id').eq('id', body.topicId).maybeSingle()
+    if (topicResult.error) return jsonResponse({ error: 'Unable to verify the selected resource topic.' }, 500)
+    if (!topicResult.data) return jsonResponse({ error: 'Resource topic not found.' }, 404)
+
+    const resource = body.resource as ResourceInput
+    const existingResourceResult = await client.from('resources').select('*')
+      .eq('resource_url', resource.resource_url.trim()).maybeSingle()
+    if (existingResourceResult.error) {
+      return jsonResponse({ error: 'Unable to check for an existing resource with this URL.' }, 500)
+    }
+    if (existingResourceResult.data) {
+      const existingAssignment = await client.from('resource_topic_resources').select('resource_id')
+        .eq('topic_id', body.topicId).eq('resource_id', existingResourceResult.data.id).maybeSingle()
+      if (existingAssignment.error) return jsonResponse({ error: 'Unable to check the current resource topic links.' }, 500)
+      if (existingAssignment.data) return jsonResponse({ error: 'This resource is already linked to the selected topic.' }, 409)
+      const assignmentResult = await client.from('resource_topic_resources').insert({
+        topic_id: body.topicId,
+        resource_id: existingResourceResult.data.id,
+      }).select().single()
+      if (assignmentResult.error) {
+        console.error('Existing resource assignment failed:', assignmentResult.error.message)
+        return jsonResponse({ error: 'The existing resource could not be added to this topic.' }, 500)
+      }
+      return jsonResponse({ data: { resource: existingResourceResult.data, assignment: assignmentResult.data } })
+    }
+
+    const resourceResult = await client.from('resources').insert({
+      title: resource.title.trim(),
+      category: resource.category,
+      description: resource.description.trim(),
+      resource_type: resource.resource_type,
+      resource_url: resource.resource_url.trim(),
+    }).select().single()
+    if (resourceResult.error || !resourceResult.data) {
+      console.error('Resource creation failed:', resourceResult.error?.message)
+      return jsonResponse({ error: 'Unable to create the requested resource.' }, 500)
+    }
+    const assignmentResult = await client.from('resource_topic_resources').insert({
+      topic_id: body.topicId,
+      resource_id: resourceResult.data.id,
+    }).select().single()
+    if (assignmentResult.error) {
+      const cleanupResult = await client.from('resources').delete().eq('id', resourceResult.data.id)
+      if (cleanupResult.error) console.error('Unable to roll back unassigned resource:', cleanupResult.error.message)
+      console.error('Resource assignment failed:', assignmentResult.error.message)
+      return jsonResponse({ error: 'The resource could not be added to this topic.' }, 500)
+    }
+    return jsonResponse({ data: { resource: resourceResult.data, assignment: assignmentResult.data } })
   } else if (action === 'add-section' || action === 'update-section') {
     if (!body.section || typeof body.section !== 'object' || !validSection(body.section as Record<string, unknown>)) {
       return jsonResponse({ error: 'Section details are invalid.' }, 400)
@@ -324,24 +377,95 @@ Deno.serve(async request => {
       result = await client.from('dsa_topic_questions').delete()
         .eq('topic_id', body.topicId).eq('question_id', body.questionId).select().maybeSingle()
     }
-  } else if (action === 'reorder-section' || action === 'reorder-section-topic') {
+  } else if (action === 'add-resource-section' || action === 'update-resource-section') {
+    if (!body.section || typeof body.section !== 'object' || !validSection(body.section as Record<string, unknown>)) {
+      return jsonResponse({ error: 'Resource section details are invalid.' }, 400)
+    }
+    const section = body.section as SectionInput
+    const values = { title: section.title.trim(), description: section.description.trim() }
+    if (action === 'add-resource-section') {
+      const currentOrder = await client.from('resource_sections').select('display_order')
+        .order('display_order', { ascending: false }).limit(1).maybeSingle()
+      if (currentOrder.error) return jsonResponse({ error: 'Unable to determine resource section order.' }, 500)
+      result = await client.from('resource_sections').insert({
+        ...values,
+        display_order: (currentOrder.data?.display_order ?? -1) + 1,
+      }).select().single()
+    } else {
+      if (!isUuid(body.id)) return jsonResponse({ error: 'A valid resource section ID is required.' }, 400)
+      result = await client.from('resource_sections').update(values).eq('id', body.id).select().maybeSingle()
+    }
+  } else if (action === 'delete-resource-section') {
+    if (!isUuid(body.id)) return jsonResponse({ error: 'A valid resource section ID is required.' }, 400)
+    result = await client.from('resource_sections').delete().eq('id', body.id).select('id').maybeSingle()
+  } else if (action === 'add-resource-section-topic' || action === 'update-resource-section-topic') {
+    if (!body.topic || typeof body.topic !== 'object' || !validSection(body.topic as Record<string, unknown>)) {
+      return jsonResponse({ error: 'Resource topic details are invalid.' }, 400)
+    }
+    const topic = body.topic as SectionTopicInput
+    const values = { title: topic.title.trim(), description: topic.description.trim() }
+    if (action === 'add-resource-section-topic') {
+      if (!isUuid(topic.section_id)) return jsonResponse({ error: 'A valid parent resource section ID is required.' }, 400)
+      const currentOrder = await client.from('resource_section_topics').select('display_order')
+        .eq('section_id', topic.section_id).order('display_order', { ascending: false }).limit(1).maybeSingle()
+      if (currentOrder.error) return jsonResponse({ error: 'Unable to determine resource topic order.' }, 500)
+      result = await client.from('resource_section_topics').insert({
+        ...values,
+        section_id: topic.section_id,
+        display_order: (currentOrder.data?.display_order ?? -1) + 1,
+      }).select().single()
+    } else {
+      if (!isUuid(body.id)) return jsonResponse({ error: 'A valid resource topic ID is required.' }, 400)
+      result = await client.from('resource_section_topics').update(values).eq('id', body.id).select().maybeSingle()
+    }
+  } else if (action === 'delete-resource-section-topic') {
+    if (!isUuid(body.id)) return jsonResponse({ error: 'A valid resource topic ID is required.' }, 400)
+    result = await client.from('resource_section_topics').delete().eq('id', body.id).select('id').maybeSingle()
+  } else if (action === 'assign-resource-to-topic' || action === 'remove-resource-from-topic') {
+    if (!isUuid(body.topicId) || !isUuid(body.resourceId)) {
+      return jsonResponse({ error: 'Valid resource topic and resource IDs are required.' }, 400)
+    }
+    if (action === 'assign-resource-to-topic') {
+      result = await client.from('resource_topic_resources').insert({
+        topic_id: body.topicId,
+        resource_id: body.resourceId,
+      }).select().single()
+    } else {
+      result = await client.from('resource_topic_resources').delete()
+        .eq('topic_id', body.topicId).eq('resource_id', body.resourceId).select().maybeSingle()
+    }
+  } else if (
+    action === 'reorder-section' || action === 'reorder-section-topic'
+    || action === 'reorder-resource-section' || action === 'reorder-resource-section-topic'
+  ) {
     if (!isUuid(body.id) || !['up', 'down'].includes(body.direction as string)) {
       return jsonResponse({ error: 'A valid ID and reorder direction are required.' }, 400)
     }
-    let table: 'dsa_sections' | 'dsa_section_topics'
+    let table: 'dsa_sections' | 'dsa_section_topics' | 'resource_sections' | 'resource_section_topics'
     let orderedRows: { id: string; display_order: number; created_at: string }[]
-    if (action === 'reorder-section') {
-      table = 'dsa_sections'
-      const orderResult = await client.from('dsa_sections').select('id,display_order,created_at').order('display_order').order('created_at')
+    if (action === 'reorder-section' || action === 'reorder-resource-section') {
+      const isResource = action === 'reorder-resource-section'
+      table = isResource ? 'resource_sections' : 'dsa_sections'
+      const orderResult = isResource
+        ? await client.from('resource_sections').select('id,display_order,created_at').order('display_order').order('created_at')
+        : await client.from('dsa_sections').select('id,display_order,created_at').order('display_order').order('created_at')
+      if (orderResult.error) return jsonResponse({ error: 'Unable to load the current order.' }, 500)
+      orderedRows = orderResult.data || []
+    } else if (action === 'reorder-section-topic' || action === 'reorder-resource-section-topic') {
+      const isResource = action === 'reorder-resource-section-topic'
+      const parentTable = isResource ? 'resource_section_topics' : 'dsa_section_topics'
+      if (!isUuid(body.sectionId)) return jsonResponse({ error: 'A valid parent section ID is required.' }, 400)
+      table = parentTable
+      const orderResult = isResource
+        ? await client.from('resource_section_topics').select('id,display_order,created_at')
+          .eq('section_id', body.sectionId).order('display_order').order('created_at')
+        : await client.from('dsa_section_topics').select('id,display_order,created_at')
+          .eq('section_id', body.sectionId).order('display_order').order('created_at')
       if (orderResult.error) return jsonResponse({ error: 'Unable to load the current order.' }, 500)
       orderedRows = orderResult.data || []
     } else {
-      if (!isUuid(body.sectionId)) return jsonResponse({ error: 'A valid parent section ID is required.' }, 400)
-      table = 'dsa_section_topics'
-      const orderResult = await client.from('dsa_section_topics').select('id,display_order,created_at')
-        .eq('section_id', body.sectionId).order('display_order').order('created_at')
-      if (orderResult.error) return jsonResponse({ error: 'Unable to load the current order.' }, 500)
-      orderedRows = orderResult.data || []
+      table = 'dsa_sections'
+      orderedRows = []
     }
     const ordered = orderedRows
     const currentIndex = ordered.findIndex(item => item.id === body.id)

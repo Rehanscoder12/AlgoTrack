@@ -14,6 +14,7 @@ import { getVideoSource } from './lib/video'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
 
 const PROGRESS_KEY = 'algotrack-question-progress'
+const RESOURCE_PROGRESS_KEY = 'algotrack-resource-progress'
 const ADMIN_TOKEN_KEY = 'algotrack-admin-session'
 
 const emptyQuestion = {
@@ -27,6 +28,10 @@ const emptyResource = {
 
 function readProgress() {
   try { return JSON.parse(localStorage.getItem(PROGRESS_KEY) || '{}') } catch { return {} }
+}
+
+function readResourceProgress() {
+  try { return JSON.parse(localStorage.getItem(RESOURCE_PROGRESS_KEY) || '{}') } catch { return {} }
 }
 
 function Button({ children, variant = 'primary', className = '', ...props }) {
@@ -114,7 +119,7 @@ function QuestionCard({ question, progress, onProgress, admin, onEdit, onDelete 
   </article>
 }
 
-function ResourceCard({ resource, admin, onEdit, onDelete, onPlayVideo }) {
+function ResourceCard({ resource, admin, onEdit, onDelete, onPlayVideo, progress, onProgress }) {
   const isVideo = resource.resource_type?.toLowerCase() === 'video'
   function handleCardKeyDown(event) {
     if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) {
@@ -141,9 +146,20 @@ function ResourceCard({ resource, admin, onEdit, onDelete, onPlayVideo }) {
       ? <span className="decoration-accent decoration-1 underline-offset-4 group-hover:underline">{resource.title}<Play size={12} className="ml-1 inline text-muted" /></span>
       : <a href={resource.resource_url} target="_blank" rel="noreferrer" className="decoration-accent decoration-1 underline-offset-4 hover:underline">{resource.title}<ExternalLink size={12} className="ml-1 inline text-muted" /></a>}</h3>
     {resource.description && <p className="mt-1.5 line-clamp-2 text-sm leading-6 text-muted">{resource.description}</p>}
-    <div className="mt-4 flex items-center justify-between border-t border-line pt-3 text-xs text-muted">
+    <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3 text-xs text-muted">
       <span className="rounded-md bg-paper px-2 py-1 font-medium">{resource.resource_type}</span>
-      <span>{formatDate(resource.created_at)}</span>
+      <div className="flex items-center gap-2">
+        <span>{formatDate(resource.created_at)}</span>
+        {onProgress && <select
+          className="rounded-md border border-line bg-white px-2 py-1.5 text-xs text-muted outline-none focus:border-accent"
+          aria-label={`Completion for ${resource.title}`}
+          value={progress || 'Not Started'}
+          onClick={event => event.stopPropagation()}
+          onChange={event => onProgress(resource.id, event.target.value)}
+        >
+          {['Not Started', 'In Progress', 'Completed'].map(status => <option key={status}>{status}</option>)}
+        </select>}
+      </div>
     </div>
   </article>
 }
@@ -160,13 +176,13 @@ function Modal({ title, onClose, children, width = 'max-w-lg' }) {
   </div>
 }
 
-function CompletionProgress({ completed, total }) {
+function CompletionProgress({ completed, total, unit = 'solved' }) {
   const percentage = total ? Math.round((completed / total) * 100) : 0
   return <div className="flex min-w-[135px] items-center gap-2">
     <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-paper">
       <span className="block h-full rounded-full bg-accent" style={{ width: `${percentage}%` }} />
     </span>
-    <span className="shrink-0 text-[11px] text-muted">{completed}/{total} solved</span>
+    <span className="shrink-0 text-[11px] text-muted">{completed}/{total} {unit}</span>
   </div>
 }
 
@@ -422,13 +438,268 @@ function AdminSectionManager({
   </section>
 }
 
+function PublicResourceSectionBrowser({
+  sections, sectionTopics, resourceAssignments, resources, sectionsError,
+  progress, onProgress, onPlayVideo, onRetry,
+}) {
+  const [expandedSections, setExpandedSections] = useState({})
+  const [expandedTopics, setExpandedTopics] = useState({})
+
+  if (sectionsError) return <div>
+    <Notice error={`Resource sections are unavailable. Apply supabase/migrations/20261126_resource_sections.sql, then retry. (${sectionsError})`} onRetry={onRetry} />
+    <EmptyState icon={BookOpen} title="Sections need database setup" description="Your existing resource library remains available while the section tables are prepared." />
+  </div>
+
+  if (!sections.length) return <EmptyState icon={BookOpen} title="No resource sections yet" description="The owner will publish organized resource sections here. Your resource library remains available in the other tab." />
+
+  const resourcesById = new Map(resources.map(resource => [resource.id, resource]))
+  return <div className="space-y-3">
+    {sections.map(section => {
+      const topics = sectionTopics.filter(topic => topic.section_id === section.id)
+      const topicIds = new Set(topics.map(topic => topic.id))
+      const sectionResourceIds = new Set(resourceAssignments
+        .filter(assignment => topicIds.has(assignment.topic_id))
+        .map(assignment => assignment.resource_id)
+        .filter(id => resourcesById.has(id)))
+      const sectionCompleted = [...sectionResourceIds].filter(id => progress[id] === 'Completed').length
+      const isExpanded = Boolean(expandedSections[section.id])
+
+      return <article key={section.id} className="overflow-hidden rounded-xl border border-line bg-white">
+        <button
+          className="flex w-full flex-wrap items-center justify-between gap-3 p-4 text-left sm:p-5"
+          onClick={() => setExpandedSections(current => ({ ...current, [section.id]: !current[section.id] }))}
+          aria-expanded={isExpanded}
+        >
+          <span className="flex min-w-0 items-center gap-3">
+            <ChevronDown size={17} className={`shrink-0 text-muted transition-transform ${isExpanded ? '' : '-rotate-90'}`} />
+            <span className="min-w-0">
+              <span className="block font-semibold">{section.title}</span>
+              <span className="mt-1 block text-xs text-muted">{topics.length} {topics.length === 1 ? 'topic' : 'topics'} · {sectionResourceIds.size} {sectionResourceIds.size === 1 ? 'resource' : 'resources'}</span>
+            </span>
+          </span>
+          <span className="w-full pl-8 sm:w-44 sm:shrink-0 sm:pl-0"><CompletionProgress completed={sectionCompleted} total={sectionResourceIds.size} unit="complete" /></span>
+        </button>
+        {isExpanded && <div className="space-y-3 border-t border-line bg-paper/50 p-3 sm:p-4">
+          {section.description && <p className="px-1 text-sm leading-6 text-muted">{section.description}</p>}
+          {topics.length === 0 && <p className="px-1 py-3 text-sm text-muted">Topics will appear here when added.</p>}
+          {topics.map(topic => {
+            const assignments = resourceAssignments
+              .filter(assignment => assignment.topic_id === topic.id)
+              .sort((a, b) => a.display_order - b.display_order)
+            const resourceIds = [...new Set(assignments.map(assignment => assignment.resource_id))]
+            const topicResources = resourceIds.map(id => resourcesById.get(id)).filter(Boolean)
+            const completed = resourceIds.filter(id => progress[id] === 'Completed').length
+            const isTopicExpanded = Boolean(expandedTopics[topic.id])
+            return <section key={topic.id} className="rounded-lg border border-line bg-white">
+              <button
+                className="flex w-full flex-wrap items-center justify-between gap-3 p-3.5 text-left"
+                onClick={() => setExpandedTopics(current => ({ ...current, [topic.id]: !current[topic.id] }))}
+                aria-expanded={isTopicExpanded}
+              >
+                <span className="flex items-center gap-2 font-medium">
+                  <ChevronDown size={15} className={`text-muted transition-transform ${isTopicExpanded ? '' : '-rotate-90'}`} />
+                  {topic.title}<span className="text-xs font-normal text-muted">({resourceIds.length})</span>
+                </span>
+                <CompletionProgress completed={completed} total={resourceIds.length} unit="complete" />
+              </button>
+              {isTopicExpanded && <div className="space-y-3 border-t border-line p-3.5">
+                {topic.description && <p className="text-sm leading-6 text-muted">{topic.description}</p>}
+                {topicResources.length ? <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{topicResources.map(resource => <ResourceCard
+                  key={resource.id}
+                  resource={resource}
+                  progress={progress[resource.id]}
+                  onProgress={onProgress}
+                  onPlayVideo={onPlayVideo}
+                />)}</div> : <p className="text-sm text-muted">No resources in this topic yet.</p>}
+              </div>}
+            </section>
+          })}
+        </div>}
+      </article>
+    })}
+  </div>
+}
+
+function AdminResourceSectionManager({
+  sections, sectionTopics, resourceAssignments, resources, sectionsError,
+  busy, onAction, onRetry, onEditResource, onCreateResource,
+}) {
+  const [newSection, setNewSection] = useState({ title: '', description: '' })
+  const [editingSection, setEditingSection] = useState(null)
+  const [newTopic, setNewTopic] = useState(null)
+  const [topicForm, setTopicForm] = useState({ title: '', description: '' })
+  const [editingTopic, setEditingTopic] = useState(null)
+  const [assignmentSelection, setAssignmentSelection] = useState({})
+
+  async function createSection(event) {
+    event.preventDefault()
+    if (!newSection.title.trim()) return
+    if (await onAction('add-resource-section', { section: newSection }, 'Resource section created.')) {
+      setNewSection({ title: '', description: '' })
+    }
+  }
+
+  async function saveSection(event) {
+    event.preventDefault()
+    if (!editingSection?.form.title.trim()) return
+    if (await onAction('update-resource-section', { id: editingSection.id, section: editingSection.form }, 'Resource section updated.')) {
+      setEditingSection(null)
+    }
+  }
+
+  async function createTopic(event, sectionId) {
+    event.preventDefault()
+    if (!topicForm.title.trim()) return
+    if (await onAction('add-resource-section-topic', {
+      topic: { ...topicForm, section_id: sectionId },
+    }, 'Resource topic created.')) {
+      setNewTopic(null)
+      setTopicForm({ title: '', description: '' })
+    }
+  }
+
+  async function saveTopic(event) {
+    event.preventDefault()
+    if (!editingTopic?.form.title.trim()) return
+    if (await onAction('update-resource-section-topic', {
+      id: editingTopic.id,
+      topic: editingTopic.form,
+    }, 'Resource topic updated.')) {
+      setEditingTopic(null)
+    }
+  }
+
+  if (sectionsError) return <section className="mt-8 border-t border-line pt-5">
+    <h3 className="font-semibold">Resource sections and topics</h3>
+    <Notice error={`Apply supabase/migrations/20261126_resource_sections.sql to enable this feature. (${sectionsError})`} onRetry={onRetry} />
+  </section>
+
+  return <section className="mt-8 border-t border-line pt-5">
+    <div className="mb-4">
+      <h3 className="font-semibold">Resource sections and topics</h3>
+      <p className="mt-1 text-xs leading-5 text-muted">Organize shared resources into study paths. A resource stays a single record when linked in multiple topics.</p>
+    </div>
+    <form className="mb-5 grid gap-3 rounded-xl border border-line bg-paper p-4 sm:grid-cols-[1fr_1.5fr_auto] sm:items-end" onSubmit={createSection}>
+      <Field label="New section title">
+        <input className={inputClass} value={newSection.title} maxLength={180} onChange={event => setNewSection({ ...newSection, title: event.target.value })} placeholder="e.g. Interview Preparation" required />
+      </Field>
+      <Field label="Description (optional)">
+        <input className={inputClass} value={newSection.description} maxLength={2000} onChange={event => setNewSection({ ...newSection, description: event.target.value })} placeholder="A short overview" />
+      </Field>
+      <Button disabled={busy}><Plus size={15} />Create section</Button>
+    </form>
+
+    {sections.length === 0 ? <p className="rounded-lg bg-paper px-4 py-5 text-sm text-muted">No sections yet. Create one to start organizing resources.</p> : <div className="space-y-4">
+      {sections.map((section, sectionIndex) => {
+        const topics = sectionTopics.filter(topic => topic.section_id === section.id)
+        const editingThisSection = editingSection?.id === section.id
+        return <article key={section.id} className="rounded-xl border border-line p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            {editingThisSection ? <form className="grid min-w-0 flex-1 gap-3 sm:grid-cols-2" onSubmit={saveSection}>
+              <Field label="Section title"><input className={inputClass} value={editingSection.form.title} maxLength={180} onChange={event => setEditingSection({ ...editingSection, form: { ...editingSection.form, title: event.target.value } })} required /></Field>
+              <Field label="Description"><input className={inputClass} value={editingSection.form.description} maxLength={2000} onChange={event => setEditingSection({ ...editingSection, form: { ...editingSection.form, description: event.target.value } })} /></Field>
+              <div className="flex gap-2 sm:col-span-2"><Button disabled={busy}>Save section</Button><Button type="button" variant="outline" onClick={() => setEditingSection(null)}>Cancel</Button></div>
+            </form> : <div className="min-w-0 flex-1">
+              <h4 className="font-semibold">{section.title}</h4>
+              {section.description && <p className="mt-1 text-sm leading-5 text-muted">{section.description}</p>}
+              <p className="mt-1 text-xs text-muted">{topics.length} {topics.length === 1 ? 'topic' : 'topics'}</p>
+            </div>}
+            <div className="flex shrink-0 items-center gap-1">
+              <button title="Move resource section up" aria-label="Move resource section up" disabled={busy || sectionIndex === 0} onClick={() => onAction('reorder-resource-section', { id: section.id, direction: 'up' }, 'Resource section order updated.')} className="rounded-md p-2 text-muted hover:bg-paper disabled:opacity-30"><ArrowUp size={15} /></button>
+              <button title="Move resource section down" aria-label="Move resource section down" disabled={busy || sectionIndex === sections.length - 1} onClick={() => onAction('reorder-resource-section', { id: section.id, direction: 'down' }, 'Resource section order updated.')} className="rounded-md p-2 text-muted hover:bg-paper disabled:opacity-30"><ArrowDown size={15} /></button>
+              {!editingThisSection && <button title="Edit resource section" aria-label="Edit resource section" onClick={() => setEditingSection({ id: section.id, form: { title: section.title, description: section.description || '' } })} className="rounded-md p-2 text-muted hover:bg-paper hover:text-ink"><FileText size={15} /></button>}
+              <button title="Delete resource section" aria-label="Delete resource section" disabled={busy} onClick={() => {
+                if (window.confirm(`Delete "${section.title}" and its topics? Resources themselves will remain unchanged.`)) onAction('delete-resource-section', { id: section.id }, 'Resource section deleted.')
+              }} className="rounded-md p-2 text-muted hover:bg-red-50 hover:text-red-600 disabled:opacity-30"><Trash2 size={15} /></button>
+            </div>
+          </div>
+
+          <div className="mt-4 border-t border-line pt-3">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <h5 className="text-xs font-bold uppercase tracking-wider text-muted">Topics</h5>
+              <Button variant="outline" className="!px-3 !py-1.5 !text-xs" disabled={busy} onClick={() => { setNewTopic(section.id); setTopicForm({ title: '', description: '' }) }}><Plus size={13} />Add topic</Button>
+            </div>
+            {newTopic === section.id && <form className="mb-3 grid gap-2 rounded-lg bg-paper p-3 sm:grid-cols-[1fr_1.4fr_auto_auto] sm:items-end" onSubmit={event => createTopic(event, section.id)}>
+              <Field label="Topic title"><input className={inputClass} value={topicForm.title} maxLength={180} onChange={event => setTopicForm({ ...topicForm, title: event.target.value })} required /></Field>
+              <Field label="Description (optional)"><input className={inputClass} value={topicForm.description} maxLength={2000} onChange={event => setTopicForm({ ...topicForm, description: event.target.value })} /></Field>
+              <Button disabled={busy}>Save topic</Button>
+              <Button type="button" variant="outline" onClick={() => setNewTopic(null)}>Cancel</Button>
+            </form>}
+            {topics.length === 0 && newTopic !== section.id && <p className="py-2 text-sm text-muted">No topics in this section.</p>}
+            <div className="space-y-3">
+              {topics.map((topic, topicIndex) => {
+                const links = resourceAssignments.filter(assignment => assignment.topic_id === topic.id)
+                const assignedIds = new Set(links.map(assignment => assignment.resource_id))
+                const assignedResources = links.map(link => resources.find(resource => resource.id === link.resource_id)).filter(Boolean)
+                const availableResources = resources.filter(resource => !assignedIds.has(resource.id))
+                const editingThisTopic = editingTopic?.id === topic.id
+                return <div key={topic.id} className="rounded-lg border border-line p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    {editingThisTopic ? <form className="grid min-w-0 flex-1 gap-2 sm:grid-cols-2" onSubmit={saveTopic}>
+                      <Field label="Topic title"><input className={inputClass} value={editingTopic.form.title} maxLength={180} onChange={event => setEditingTopic({ ...editingTopic, form: { ...editingTopic.form, title: event.target.value } })} required /></Field>
+                      <Field label="Description"><input className={inputClass} value={editingTopic.form.description} maxLength={2000} onChange={event => setEditingTopic({ ...editingTopic, form: { ...editingTopic.form, description: event.target.value } })} /></Field>
+                      <div className="flex gap-2 sm:col-span-2"><Button disabled={busy}>Save topic</Button><Button type="button" variant="outline" onClick={() => setEditingTopic(null)}>Cancel</Button></div>
+                    </form> : <div className="min-w-0 flex-1">
+                      <p className="text-sm font-semibold">{topic.title}<span className="ml-2 text-xs font-normal text-muted">{assignedResources.length} resources</span></p>
+                      {topic.description && <p className="mt-1 text-xs leading-5 text-muted">{topic.description}</p>}
+                    </div>}
+                    <div className="flex shrink-0 items-center gap-0.5">
+                      <button title="Move topic up" aria-label="Move resource topic up" disabled={busy || topicIndex === 0} onClick={() => onAction('reorder-resource-section-topic', { id: topic.id, sectionId: section.id, direction: 'up' }, 'Resource topic order updated.')} className="rounded p-1.5 text-muted hover:bg-paper disabled:opacity-30"><ArrowUp size={14} /></button>
+                      <button title="Move topic down" aria-label="Move resource topic down" disabled={busy || topicIndex === topics.length - 1} onClick={() => onAction('reorder-resource-section-topic', { id: topic.id, sectionId: section.id, direction: 'down' }, 'Resource topic order updated.')} className="rounded p-1.5 text-muted hover:bg-paper disabled:opacity-30"><ArrowDown size={14} /></button>
+                      {!editingThisTopic && <button title="Edit topic" aria-label="Edit resource topic" onClick={() => setEditingTopic({ id: topic.id, form: { title: topic.title, description: topic.description || '' } })} className="rounded p-1.5 text-muted hover:bg-paper hover:text-ink"><FileText size={14} /></button>}
+                      <button title="Delete topic" aria-label="Delete resource topic" disabled={busy} onClick={() => {
+                        if (window.confirm(`Delete topic "${topic.title}" and its resource links? Original resources will remain.`)) onAction('delete-resource-section-topic', { id: topic.id }, 'Resource topic deleted.')
+                      }} className="rounded p-1.5 text-muted hover:bg-red-50 hover:text-red-600 disabled:opacity-30"><Trash2 size={14} /></button>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-end gap-2 border-t border-line pt-3">
+                    <label className="min-w-[220px] flex-1 space-y-1">
+                      <span className="text-xs font-semibold text-muted">Add existing resource</span>
+                      <select className={selectClass} value={assignmentSelection[topic.id] || ''} onChange={event => setAssignmentSelection(current => ({ ...current, [topic.id]: event.target.value }))}>
+                        <option value="">Choose a resource…</option>
+                        {availableResources.map(resource => <option key={resource.id} value={resource.id}>{resource.title}</option>)}
+                      </select>
+                    </label>
+                    <Button variant="outline" className="!py-2" disabled={busy || !assignmentSelection[topic.id]} onClick={async () => {
+                      const resourceId = assignmentSelection[topic.id]
+                      if (await onAction('assign-resource-to-topic', { topicId: topic.id, resourceId }, 'Resource added to topic.')) {
+                        setAssignmentSelection(current => ({ ...current, [topic.id]: '' }))
+                      }
+                    }}><Plus size={14} />Add resource</Button>
+                    <Button variant="outline" className="!py-2" disabled={busy} onClick={() => onCreateResource(topic)}><Plus size={14} />Create new</Button>
+                  </div>
+                  {assignedResources.length > 0 && <div className="mt-3 divide-y divide-line border-t border-line">
+                    {assignedResources.map(resource => <div key={resource.id} className="flex items-center justify-between gap-2 py-2">
+                      <div className="min-w-0"><p className="truncate text-sm font-medium">{resource.title}</p><p className="text-xs text-muted">{resource.resource_type} · {resource.category}</p></div>
+                      <div className="flex shrink-0 gap-1">
+                        <button title="Edit resource" aria-label={`Edit ${resource.title}`} onClick={() => onEditResource(resource)} className="rounded p-1.5 text-muted hover:bg-paper hover:text-ink"><FileText size={14} /></button>
+                        <button title="Remove from this topic" aria-label={`Remove ${resource.title} from this topic`} onClick={() => {
+                          if (window.confirm(`Remove "${resource.title}" from "${topic.title}"? The original resource will remain.`)) onAction('remove-resource-from-topic', { topicId: topic.id, resourceId: resource.id }, 'Resource removed from topic.')
+                        }} className="rounded p-1.5 text-muted hover:bg-red-50 hover:text-red-600"><X size={14} /></button>
+                      </div>
+                    </div>)}
+                  </div>}
+                  {availableResources.length === 0 && resources.length > 0 && <p className="mt-2 text-xs text-muted">All resources are already linked to this topic.</p>}
+                </div>
+              })}
+            </div>
+          </div>
+        </article>
+      })}
+    </div>}
+  </section>
+}
+
 function App() {
   const {
     questions, resources, sections, sectionTopics, questionAssignments,
+    resourceSections, resourceSectionTopics, resourceAssignments,
     loading, error, sectionsError, refresh,
+    resourceSectionsError,
   } = useContent()
   const [page, setPage] = useState('dashboard')
   const [dsaView, setDsaView] = useState('questions')
+  const [resourceView, setResourceView] = useState('library')
   const [mobileMenu, setMobileMenu] = useState(false)
   const [search, setSearch] = useState('')
   const [topicFilter, setTopicFilter] = useState('All topics')
@@ -437,6 +708,7 @@ function App() {
   const [categoryFilter, setCategoryFilter] = useState('All categories')
   const [sortNewest, setSortNewest] = useState(true)
   const [progress, setProgress] = useState(readProgress)
+  const [resourceProgress, setResourceProgress] = useState(readResourceProgress)
   const [adminToken, setAdminToken] = useState(() => localStorage.getItem(ADMIN_TOKEN_KEY) || '')
   const [adminOpen, setAdminOpen] = useState(false)
   const [loginOpen, setLoginOpen] = useState(false)
@@ -449,7 +721,9 @@ function App() {
   const [editing, setEditing] = useState(null)
   const [activeVideo, setActiveVideo] = useState(null)
   const [topicQuestionTarget, setTopicQuestionTarget] = useState(null)
+  const [resourceTopicTarget, setResourceTopicTarget] = useState(null)
   const questionFormRef = useRef(null)
+  const resourceFormRef = useRef(null)
 
   const solvedCount = questions.filter(question => progress[question.id] === 'Solved').length
   const filteredQuestions = useMemo(() => {
@@ -479,6 +753,12 @@ function App() {
     localStorage.setItem(PROGRESS_KEY, JSON.stringify(updated))
   }
 
+  function updateResourceProgress(id, value) {
+    const updated = { ...resourceProgress, [id]: value }
+    setResourceProgress(updated)
+    localStorage.setItem(RESOURCE_PROGRESS_KEY, JSON.stringify(updated))
+  }
+
   function openVideo(resource) {
     setActiveVideo({ ...resource, player: getVideoSource(resource.resource_url) })
   }
@@ -494,6 +774,7 @@ function App() {
   function startQuestionEdit(question) {
     setEditing({ kind: 'question', id: question.id })
     setTopicQuestionTarget(null)
+    setResourceTopicTarget(null)
     setQuestionForm({
       question_name: question.question_name, topic: question.topic, difficulty: question.difficulty,
       platform: question.platform, problem_url: question.problem_url, notes: question.notes || '',
@@ -504,11 +785,31 @@ function App() {
 
   function startResourceEdit(resource) {
     setEditing({ kind: 'resource', id: resource.id })
+    setResourceTopicTarget(null)
+    setTopicQuestionTarget(null)
     setResourceForm({
       title: resource.title, category: resource.category, description: resource.description || '',
       resource_type: resource.resource_type, resource_url: resource.resource_url,
     })
     setAdminOpen(true)
+    window.requestAnimationFrame(() => resourceFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+  }
+
+  function startResourceInTopic(topic) {
+    setEditing(null)
+    setResourceTopicTarget(topic.id)
+    setTopicQuestionTarget(null)
+    setResourceForm(emptyResource)
+    window.requestAnimationFrame(() => resourceFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+  }
+
+  function startBlankResource() {
+    setEditing(null)
+    setResourceTopicTarget(null)
+    setTopicQuestionTarget(null)
+    setResourceForm(emptyResource)
+    setAdminOpen(true)
+    window.requestAnimationFrame(() => resourceFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
   }
 
   async function adminRequest(action, data = {}) {
@@ -545,6 +846,7 @@ function App() {
     setAdminOpen(false)
     setEditing(null)
     setTopicQuestionTarget(null)
+    setResourceTopicTarget(null)
     setNotice('Admin mode ended.')
   }
 
@@ -567,6 +869,7 @@ function App() {
   function startQuestionInTopic(topic) {
     setEditing(null)
     setTopicQuestionTarget(topic.id)
+    setResourceTopicTarget(null)
     setQuestionForm(emptyQuestion)
     window.requestAnimationFrame(() => questionFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
   }
@@ -574,6 +877,7 @@ function App() {
   function startBlankQuestion() {
     setEditing(null)
     setTopicQuestionTarget(null)
+    setResourceTopicTarget(null)
     setQuestionForm(emptyQuestion)
     setAdminOpen(true)
     window.requestAnimationFrame(() => questionFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
@@ -614,14 +918,19 @@ function App() {
     setBusy(true)
     setNotice('')
     try {
-      await adminRequest(editing?.kind === 'resource' ? 'update-resource' : 'add-resource', {
+      const action = editing?.kind === 'resource'
+        ? 'update-resource'
+        : resourceTopicTarget ? 'create-resource-in-topic' : 'add-resource'
+      await adminRequest(action, {
         id: editing?.kind === 'resource' ? editing.id : undefined,
+        topicId: resourceTopicTarget || undefined,
         resource: { ...resourceForm, title: resourceForm.title.trim(), description: resourceForm.description.trim() },
       })
       setResourceForm(emptyResource)
       setEditing(null)
+      setResourceTopicTarget(null)
       await refresh()
-      setNotice('Resource saved and published.')
+      setNotice(resourceTopicTarget ? 'Resource saved and linked to the selected topic.' : 'Resource saved and published.')
     } catch (reason) { setNotice(reason.message || 'Could not save resource.') }
     finally { setBusy(false) }
   }
@@ -719,6 +1028,21 @@ function App() {
       ) : (
         <section>
           <PageHeading eyebrow="Study library" title="CS Resources" description="Curated notes, references and practice material for the subjects behind the code." />
+          <div className="mb-6 flex flex-wrap items-center gap-2 border-b border-line pb-4">
+            <button onClick={() => setResourceView('library')} className={`rounded-lg px-3.5 py-2 text-sm font-semibold ${resourceView === 'library' ? 'bg-white text-ink ring-1 ring-line' : 'text-muted hover:text-ink'}`}>Resource library</button>
+            <button onClick={() => setResourceView('sections')} className={`rounded-lg px-3.5 py-2 text-sm font-semibold ${resourceView === 'sections' ? 'bg-white text-ink ring-1 ring-line' : 'text-muted hover:text-ink'}`}>Study sections</button>
+          </div>
+          {resourceView === 'sections' ? <PublicResourceSectionBrowser
+            sections={resourceSections}
+            sectionTopics={resourceSectionTopics}
+            resourceAssignments={resourceAssignments}
+            resources={resources}
+            sectionsError={resourceSectionsError}
+            progress={resourceProgress}
+            onProgress={updateResourceProgress}
+            onPlayVideo={openVideo}
+            onRetry={refresh}
+          /> : <>
           <div className="mb-6 flex flex-col gap-3 sm:flex-row">
             <div className="relative flex-1">
               <Search size={17} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted" />
@@ -729,7 +1053,7 @@ function App() {
           </div>
           <div className="mb-5 flex items-center justify-between text-sm text-muted">
             <span>{filteredResources.length} {filteredResources.length === 1 ? 'resource' : 'resources'}</span>
-            {adminToken && <Button variant="outline" className="!py-2" onClick={() => { setEditing(null); setAdminOpen(true) }}><Plus size={15} />Add resource</Button>}
+            {adminToken && <Button variant="outline" className="!py-2" onClick={startBlankResource}><Plus size={15} />Add resource</Button>}
           </div>
           {filteredResources.length === 0 ? <EmptyState icon={BookOpen} title={search || categoryFilter !== 'All categories' ? 'No matching resources' : 'No resources yet'} description={search || categoryFilter !== 'All categories' ? 'Try a different search or category.' : 'Study materials added by the owner will appear here by category.'} /> : (
             <div className="space-y-8">
@@ -741,6 +1065,7 @@ function App() {
               </section>)}
             </div>
           )}
+          </>}
         </section>
       )}
     </main>
@@ -764,7 +1089,7 @@ function App() {
       </form>
     </Modal>}
 
-    {adminOpen && adminToken && <Modal title="Manage AlgoTrack" width="max-w-5xl" onClose={() => { setAdminOpen(false); setEditing(null); setTopicQuestionTarget(null) }}>
+    {adminOpen && adminToken && <Modal title="Manage AlgoTrack" width="max-w-5xl" onClose={() => { setAdminOpen(false); setEditing(null); setTopicQuestionTarget(null); setResourceTopicTarget(null) }}>
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-lg bg-paper px-4 py-3">
         <div><p className="text-sm font-semibold">Admin mode is on</p><p className="mt-0.5 text-xs text-muted">Changes publish for every visitor.</p></div>
         <Button variant="outline" className="!py-2" onClick={logout}><LogOut size={15} />End session</Button>
@@ -784,8 +1109,9 @@ function App() {
           <div className="flex justify-end gap-2"><Button variant="outline" type="button" onClick={() => { setQuestionForm(emptyQuestion); setTopicQuestionTarget(null); if (editing?.kind === 'question') setEditing(null) }}>Clear</Button><Button disabled={busy}>{busy && <LoaderCircle size={15} className="animate-spin" />}{editing?.kind === 'question' ? 'Save changes' : topicQuestionTarget ? 'Create and assign' : 'Publish question'}</Button></div>
         </form>
 
-        <form className="space-y-4 rounded-xl border border-line p-4 sm:p-5" onSubmit={saveResource}>
-          <div className="flex items-center gap-2"><BookOpen size={17} className="text-accent" /><h3 className="font-semibold">{editing?.kind === 'resource' ? 'Edit resource' : 'Add CS resource'}</h3></div>
+        <form id="resource-admin-form" ref={resourceFormRef} className="space-y-4 rounded-xl border border-line p-4 sm:p-5" onSubmit={saveResource}>
+          <div className="flex items-center gap-2"><BookOpen size={17} className="text-accent" /><h3 className="font-semibold">{editing?.kind === 'resource' ? 'Edit resource' : resourceTopicTarget ? 'Add resource to selected topic' : 'Add CS resource'}</h3></div>
+          {resourceTopicTarget && <p className="text-xs leading-5 text-muted">The resource will be created once and linked to this topic. Existing resources with the same URL are reused.</p>}
           <Field label="Resource title"><input className={inputClass} maxLength={180} value={resourceForm.title} onChange={e => setResourceForm({ ...resourceForm, title: e.target.value })} required /></Field>
           <div className="grid gap-3 sm:grid-cols-2">
             <SelectField label="Category" value={resourceForm.category} options={CATEGORIES} onChange={e => setResourceForm({ ...resourceForm, category: e.target.value })} />
@@ -793,7 +1119,7 @@ function App() {
           </div>
           <Field label="Resource URL"><input type="url" className={inputClass} placeholder="https://" value={resourceForm.resource_url} onChange={e => setResourceForm({ ...resourceForm, resource_url: e.target.value })} required /></Field>
           <Field label="Description" hint="Optional · up to 2,000 characters"><textarea className={`${inputClass} min-h-24 resize-y`} maxLength={2000} value={resourceForm.description} onChange={e => setResourceForm({ ...resourceForm, description: e.target.value })} /></Field>
-          <div className="flex justify-end gap-2"><Button variant="outline" type="button" onClick={() => { setResourceForm(emptyResource); if (editing?.kind === 'resource') setEditing(null) }}>Clear</Button><Button disabled={busy}>{busy && <LoaderCircle size={15} className="animate-spin" />}{editing?.kind === 'resource' ? 'Save changes' : 'Publish resource'}</Button></div>
+          <div className="flex justify-end gap-2"><Button variant="outline" type="button" onClick={() => { setResourceForm(emptyResource); setResourceTopicTarget(null); if (editing?.kind === 'resource') setEditing(null) }}>Clear</Button><Button disabled={busy}>{busy && <LoaderCircle size={15} className="animate-spin" />}{editing?.kind === 'resource' ? 'Save changes' : resourceTopicTarget ? 'Create and assign' : 'Publish resource'}</Button></div>
         </form>
       </div>
       <div className="mt-7 border-t border-line pt-5">
@@ -828,6 +1154,18 @@ function App() {
         onRetry={refresh}
         onEditQuestion={startQuestionEdit}
         onCreateQuestion={startQuestionInTopic}
+      />
+      <AdminResourceSectionManager
+        sections={resourceSections}
+        sectionTopics={resourceSectionTopics}
+        resourceAssignments={resourceAssignments}
+        resources={resources}
+        sectionsError={resourceSectionsError}
+        busy={busy}
+        onAction={performAdminAction}
+        onRetry={refresh}
+        onEditResource={startResourceEdit}
+        onCreateResource={startResourceInTopic}
       />
     </Modal>}
   </div>
