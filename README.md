@@ -122,10 +122,23 @@ Never put your Supabase service role key or admin secrets in frontend environmen
 
 - Create a Supabase project.
 - Run `supabase/schema.sql` in the Supabase SQL Editor.
+- Run `supabase/migrations/20261125_dsa_sections.sql` after `schema.sql` to add admin-managed DSA sections, topics, and question links.
 - Configure the required environment variables.
 - Deploy the `admin-content` Edge Function if you need admin functionality.
 
 The public pages can run without Supabase configuration as an empty-state preview. Shared content and admin operations require a configured backend.
+
+#### Apply the DSA sections migration to an existing project
+
+Back up the database first. In the Supabase Dashboard, open **SQL Editor**, paste the contents of `supabase/migrations/20261125_dsa_sections.sql`, and run it. The migration only creates the three section/link tables, their indexes, read-only RLS policies, and grants. It does not update or delete existing questions or resources, and can be safely rerun.
+
+After applying it, redeploy the existing admin function so its section, topic, ordering, and question-link actions are available:
+
+```bash
+npx supabase functions deploy admin-content
+```
+
+Questions remain stored once in `questions`; `dsa_topic_questions` links a question to one or more section topics. Deleting a section or topic only removes its links, while deleting a question through the existing global question manager removes its links through the foreign-key cascade.
 
 ### 6. Start the Development Server
 
